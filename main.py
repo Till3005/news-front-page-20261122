@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""THE WORLD DAILY - front page for Sunday, 22 November 2026.
+"""THE WORLD DAILY -- Sunday, 22 November 2026, front page as one PNG.
 
-Renders a broadsheet newspaper front page as a PNG using only the Python
-standard library (struct + zlib). No network, no clock, no randomness:
-the output is byte-for-byte deterministic.
+This program draws the whole page by hand into an RGB byte buffer and
+pushes it through a minimal PNG encoder.  Only the Python standard
+library is used (os, struct, zlib): no network, no clock, no random
+source.  The paper-grain speckle is driven by a fixed-seed LCG, so two
+runs emit the identical file.
 
 Usage: MAKEFUN_OUTPUT_DIR=out python3 main.py
 """
@@ -12,22 +14,29 @@ import os
 import struct
 import zlib
 
-W, H = 1024, 984
+# ----------------------------------------------------------------- canvas --
+PAGE_W, PAGE_H = 1024, 984
+SIDE = 28                       # page margin
+SPAN = PAGE_W - 2 * SIDE        # full text width across the sheet
+CELL_W, GUTTER, ROW_STEP = 309, 20, 112   # wire-grid geometry
+LEFT_COL = (SIDE, 596)          # twin-column lead: (x, width)
+RIGHT_COL = (648, 348)
 
-# ---------------------------------------------------------------- palette --
-PAPER = (247, 243, 232)
-INK = (16, 16, 18)
-GREY = (104, 102, 98)
-RULE = (24, 24, 26)
-RED = (156, 26, 26)
+# ------------------------------------------------------------------- inks --
+NEWSPRINT = (247, 243, 232)     # warm paper
+TONE_TEXT = (16, 16, 18)        # near-black body ink
+TONE_FAINT = (104, 102, 98)     # folio lines, hairlines
+TONE_RULE = (24, 24, 26)        # heavy rules
+TONE_ACCENT = (156, 26, 26)     # the one red on the page
 BLUE = (24, 62, 118)
 GREEN = (30, 108, 66)
 GOLD = (216, 166, 32)
 WHITE = (248, 248, 244)
 
-# ------------------------------------------------------------ tiny 5x7 font
-# Row-major: 7 bytes per glyph, bit 4 = leftmost column.
-FONT = {
+# ------------------------------------------------------- letterforms 5x7 --
+# One tuple of 7 bit-patterns per glyph, row-major; bit 4 is the leftmost
+# column of the 5-wide cell.  Scaled at draw time; bold = double-strike.
+GLYPHS = {
     "A": (0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11),
     "B": (0x1E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x1E),
     "C": (0x0E, 0x11, 0x10, 0x10, 0x10, 0x11, 0x0E),
@@ -119,20 +128,20 @@ FONT = {
     "\x95": (0x00, 0x00, 0x04, 0x0E, 0x04, 0x00, 0x00),
 }
 
-# --------------------------------------------------------- pictogram art ---
-# 12x12 character grids; '.' = transparent (paper shows through).
-PICO_PALETTE = {
-    "K": INK,
-    "R": RED,
+# ----------------------------------------------------------- spot icons ---
+# 12x12 character grids.  '.' stays transparent; letters map to inks.
+ICON_INKS = {
+    "K": TONE_TEXT,
+    "R": TONE_ACCENT,
     "B": BLUE,
     "G": GREEN,
     "Y": GOLD,
     "W": WHITE,
-    "g": GREY,
+    "g": TONE_FAINT,
 }
 
-PICO = {
-    # COP31: the globe, blue oceans, green land
+ICONS = {
+    # Earth for the Antalya climate talks
     "globe": (
         "....BBBB....",
         "..BBBBBBBB..",
@@ -147,7 +156,7 @@ PICO = {
         "..BBBBBBBB..",
         "....BBBB....",
     ),
-    # Iran lead: burning oil tanker on the waves
+    # Burning product tanker, for the Gulf lead
     "tanker": (
         "........RR..",
         ".......RRRR.",
@@ -162,7 +171,7 @@ PICO = {
         ".BB.....BBB.",
         "..BBB....BB.",
     ),
-    # Poland: missile with red exhaust trail
+    # Missile with a red exhaust streak, for the Poland item
     "missile": (
         ".........KK.",
         "........KKKK",
@@ -177,7 +186,7 @@ PICO = {
         "RRR.........",
         "............",
     ),
-    # Denmark: the Dannebrog, red with white Nordic cross
+    # Dannebrog: red field, white Nordic cross
     "danmark": (
         "KKKKKKKKKKKK",
         "KRRRWWRRRRRK",
@@ -192,7 +201,7 @@ PICO = {
         "KRRRWWRRRRRK",
         "KKKKKKKKKKKK",
     ),
-    # Mexico: gold law-enforcement star
+    # Gold marshal's star, for the Mexico arrest
     "badge": (
         ".....YY.....",
         "....YYYY....",
@@ -207,7 +216,7 @@ PICO = {
         "..Y......Y..",
         "............",
     ),
-    # Iraq: power-station fire, red with gold core
+    # Fire with a gold core, for the Basra power station
     "flame": (
         "......R.....",
         "......RR....",
@@ -222,7 +231,7 @@ PICO = {
         "..RYYYYR....",
         "...RRRR.....",
     ),
-    # Youth strike: protest placard with painted exclamation mark
+    # Demonstrator's placard, for the school strikes
     "placard": (
         "KKKKKKKKKKKK",
         "KWWWWWWWWWWK",
@@ -237,7 +246,7 @@ PICO = {
         ".....KK.....",
         ".....KK.....",
     ),
-    # Spain: red-roofed house (housing fund)
+    # Tiled house, for the Spanish housing levy
     "house": (
         ".....KK.....",
         "....KKKK....",
@@ -252,7 +261,7 @@ PICO = {
         ".KWKKWWKKWK.",
         ".KKKKKKKKKK.",
     ),
-    # Japan: snow-capped peak under falling snow
+    # Snowed-in mountain, for the Fukushima village
     "snow": (
         ".g...g...g..",
         "...g....g...",
@@ -267,7 +276,7 @@ PICO = {
         "g....g....g.",
         "...g....g...",
     ),
-    # India: six-lane Ganga bridge over blue water
+    # Ganga crossing: pylons, deck, arch piers, river
     "bridge": (
         "............",
         "....K..K....",
@@ -282,7 +291,7 @@ PICO = {
         ".BB..BB..BB.",
         "..BB..BB..BB",
     ),
-    # Tennis: racket and ball
+    # Racket and ball, for the Turin final
     "racket": (
         "..KKKKKKK...",
         "..KWWWWWK...",
@@ -299,343 +308,327 @@ PICO = {
     ),
 }
 
-# --------------------------------------------------------------- stories ---
-# All items are anchored to Sunday, 22 November 2026 (see design-notes.md).
-BANNER_TAG = "MIDDLE EAST CRISIS - THE GULF"
-BANNER_HEAD = "TRUMP DEFERS IRAN STRIKES UNTIL AFTER NEW YEAR"
-BANNER_DECK = ("Three tankers are struck near the Strait of Hormuz and another "
-               "off Oman; Qatar mediates in Tehran as Iran vows 'any measure' "
-               "to break the US blockade")
+# ------------------------------------------------------------ today's copy -
+# Every line below is anchored to Sunday, 22 November 2026.
 
-IRAN_BODY = ("President Trump has deferred any decision on renewed strikes "
+LEAD_KICKER = "MIDDLE EAST CRISIS - THE GULF"
+LEAD_HEADLINE = "TRUMP DEFERS IRAN STRIKES UNTIL AFTER NEW YEAR"
+LEAD_DECK = ("Three tankers are struck near the Strait of Hormuz and another "
+             "off Oman; Qatar mediates in Tehran as Iran vows 'any measure' "
+             "to break the US blockade")
+
+IRAN_COPY = ("President Trump has deferred any decision on renewed strikes "
              "against Iran until after the New Year. Qatar's delegation is in "
              "Tehran to mediate; Iran demands a guarantee against renewed "
              "attacks and vows any measure to break the US blockade. Central "
              "Command denies an Iranian claim that a missile damaged an F-16.")
 
-STORIES = {
-    "cop": {
-        "tag": "CLIMATE - ANTALYA",
-        "head": "COP31 RUNS INTO OVERTIME WITH NO FINAL TEXT",
-        "body": ("Ministers wrestle over the response to worsening global "
-                 "warming as the talks blow past their deadline."),
-        "pico": "globe",
-    },
-    "pol": {
-        "tag": "WORLD - WARSAW",
-        "head": "RUSSIAN MISSILES LAND ON POLISH SOIL",
-        "body": ("PM calls it likely a provocation timed to NATO exercises."),
-        "pico": "missile",
-    },
-    "den": {
-        "tag": "EUROPE - COPENHAGEN",
-        "head": "DENMARK EXPELS RUSSIAN DEFENCE ATTACHE",
-        "body": ("Non-essential visas are halted; Ukraine backing goes on."),
-        "pico": "danmark",
-    },
-    "mex": {
-        "tag": "CRIME - MEXICO CITY",
-        "head": "MOST-WANTED DRUG TRAFFICKER HELD",
-        "body": ("The arrest sparks gunfights, vehicle arsons and road "
-                 "blockades."),
-        "pico": "badge",
-    },
-    "irq": {
-        "tag": "DISASTER - BASRA",
-        "head": "POWER STATION FIRE KILLS FOUR",
-        "body": ("At least 35 are hurt in the blaze at Hartha, north of "
-                 "Basra."),
-        "pico": "flame",
-    },
-    "yth": {
-        "tag": "EUROPE - 25 COUNTRIES",
-        "head": "STUDENTS STRIKE OVER SCHOOLS AND CLIMATE",
-        "body": ("Protests hit 73 German cities over funding, climate and "
-                 "the draft."),
-        "pico": "placard",
-    },
-    "esp": {
-        "tag": "EUROPE - MADRID",
-        "head": "SANCHEZ EXTENDS BANK LEVY TO FUND HOUSING",
-        "body": ("The levy runs to 2027; a snap election is set for November "
-                 "29."),
-        "pico": "house",
-    },
-}
+# (tag, headline, body, icon)
+COP31 = ("CLIMATE - ANTALYA",
+         "COP31 RUNS INTO OVERTIME WITH NO FINAL TEXT",
+         "Ministers wrestle over the response to worsening global warming "
+         "as the talks blow past their deadline.",
+         "globe")
 
-BRIEFS = [
-    ("snow", "JAPAN", "Heavy snow isolates 1,000+ people in the Fukushima "
-     "village of Kitashiobara; Princess Aiko returns from Singapore as ties "
-     "mark 60 years."),
-    ("bridge", "INDIA", "Modi opens a 9.76 km six-lane bridge over the "
-     "Ganga; officials meet in Dhaka as the water treaty's December 12 "
-     "expiry nears."),
-    ("racket", "SPORT", "The ATP Finals champion is crowned in Turin "
-     "tonight."),
-]
+WIRE = (
+    ("WORLD - WARSAW",
+     "RUSSIAN MISSILES LAND ON POLISH SOIL",
+     "PM calls it likely a provocation timed to NATO exercises.",
+     "missile"),
+    ("EUROPE - COPENHAGEN",
+     "DENMARK EXPELS RUSSIAN DEFENCE ATTACHE",
+     "Non-essential visas are halted; Ukraine backing goes on.",
+     "danmark"),
+    ("CRIME - MEXICO CITY",
+     "MOST-WANTED DRUG TRAFFICKER HELD",
+     "The arrest sparks gunfights, vehicle arsons and road blockades.",
+     "badge"),
+    ("DISASTER - BASRA",
+     "POWER STATION FIRE KILLS FOUR",
+     "At least 35 are hurt in the blaze at Hartha, north of Basra.",
+     "flame"),
+    ("EUROPE - 25 COUNTRIES",
+     "STUDENTS STRIKE OVER SCHOOLS AND CLIMATE",
+     "Protests hit 73 German cities over funding, climate and the draft.",
+     "placard"),
+    ("EUROPE - MADRID",
+     "SANCHEZ EXTENDS BANK LEVY TO FUND HOUSING",
+     "The levy runs to 2027; a snap election is set for November 29.",
+     "house"),
+)
 
-# ------------------------------------------------------------ PNG encoder --
+# (icon, tag, one-liner)
+AGATE = (
+    ("snow", "JAPAN",
+     "Heavy snow isolates 1,000+ people in the Fukushima village of "
+     "Kitashiobara; Princess Aiko returns from Singapore as ties mark "
+     "60 years."),
+    ("bridge", "INDIA",
+     "Modi opens a 9.76 km six-lane bridge over the Ganga; officials "
+     "meet in Dhaka as the water treaty's December 12 expiry nears."),
+    ("racket", "SPORT",
+     "The ATP Finals champion is crowned in Turin tonight."),
+)
 
-def write_png(path, w, h, rgb):
-    def chunk(tag, data):
-        return (struct.pack(">I", len(data)) + tag + data
-                + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF))
+# ------------------------------------------------------------ PNG output --
 
-    stride = w * 3
-    raw = bytearray()
-    for y in range(h):
-        raw.append(0)
-        raw += rgb[y * stride:(y + 1) * stride]
-    ihdr = struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)
-    with open(path, "wb") as f:
-        f.write(b"\x89PNG\r\n\x1a\n")
-        f.write(chunk(b"IHDR", ihdr))
-        f.write(chunk(b"IDAT", zlib.compress(bytes(raw), 9)))
-        f.write(chunk(b"IEND", b""))
+def encode_png(path, width, height, pixels):
+    """Write width*height*3 RGB bytes as a minimal truecolour PNG."""
+    def segment(kind, payload):
+        return (struct.pack(">I", len(payload)) + kind + payload
+                + struct.pack(">I", zlib.crc32(kind + payload) & 0xFFFFFFFF))
+
+    stride = width * 3
+    stream = bytearray()
+    for row in range(height):
+        stream.append(0)                      # filter type None per line
+        stream += pixels[row * stride:(row + 1) * stride]
+    header = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    with open(path, "wb") as fh:
+        fh.write(b"\x89PNG\r\n\x1a\n")
+        fh.write(segment(b"IHDR", header))
+        fh.write(segment(b"IDAT", zlib.compress(bytes(stream), 9)))
+        fh.write(segment(b"IEND", b""))
 
 
-# ----------------------------------------------------------------- canvas --
+# ----------------------------------------------------------------- raster --
 
-class Canvas:
-    def __init__(self, w, h, bg):
-        self.w, self.h = w, h
-        self.data = bytearray(bytes(bg) * (w * h))
+class Page:
+    """Flat RGB raster with inclusive rectangle primitives."""
 
-    def px(self, x, y, c):
-        if 0 <= x < self.w and 0 <= y < self.h:
-            i = (y * self.w + x) * 3
-            self.data[i:i + 3] = bytes(c)
+    def __init__(self, width, height, tone):
+        self.width = width
+        self.height = height
+        self.pixels = bytearray(bytes(tone) * (width * height))
 
-    def fill(self, x0, y0, x1, y1, c):
-        x0, y0 = max(0, x0), max(0, y0)
-        x1, y1 = min(self.w - 1, x1), min(self.h - 1, y1)
-        if x1 < x0 or y1 < y0:
+    def rect(self, left, top, right, bottom, tone):
+        left = max(0, left)
+        top = max(0, top)
+        right = min(self.width - 1, right)
+        bottom = min(self.height - 1, bottom)
+        if right < left or bottom < top:
             return
-        row = bytes(c) * (x1 - x0 + 1)
-        for y in range(y0, y1 + 1):
-            i = (y * self.w + x0) * 3
-            self.data[i:i + len(row)] = row
+        stripe = bytes(tone) * (right - left + 1)
+        for row in range(top, bottom + 1):
+            at = (row * self.width + left) * 3
+            self.pixels[at:at + len(stripe)] = stripe
 
-    def hline(self, x0, x1, y, c, thick=1):
-        self.fill(x0, y, x1, y + thick - 1, c)
+    def bar(self, left, right, y, tone, weight=1):
+        self.rect(left, y, right, y + weight - 1, tone)
 
-    def vline(self, x, y0, y1, c, thick=1):
-        self.fill(x, y0, x + thick - 1, y1, c)
-
-
-def grain(cv, seed=20261122):
-    """Subtle deterministic paper texture."""
-    s = seed
-    d = cv.data
-    for i in range(0, len(d), 3):
-        s = (s * 1103515245 + 12345) & 0x7FFFFFFF
-        n = ((s >> 16) & 7) - 3
-        if n:
-            for k in (0, 1, 2):
-                v = d[i + k] + n
-                if 0 <= v <= 255:
-                    d[i + k] = v
+    def post(self, x, top, bottom, tone, weight=1):
+        self.rect(x, top, x + weight - 1, bottom, tone)
 
 
-def text_w(s, scale):
-    return max(0, len(s) * 6 - 1) * scale
+def speckle(page, seed=20261122):
+    """Press a faint fixed-seed LCG grain into the paper."""
+    state = seed
+    rgb = page.pixels
+    for i in range(0, len(rgb), 3):
+        state = (state * 1103515245 + 12345) & 0x7FFFFFFF
+        delta = ((state >> 16) & 7) - 3
+        if delta:
+            for channel in (0, 1, 2):
+                value = rgb[i + channel] + delta
+                if 0 <= value <= 255:
+                    rgb[i + channel] = value
 
 
-def draw_text(cv, x, y, s, scale, color, bold=0):
+# ------------------------------------------------------------ typesetting -
+
+def width(s, k):
+    return max(0, len(s) * 6 - 1) * k
+
+
+def set_line(page, x, y, s, k, tone, weight=0):
+    """Set one line; weight>0 double-strikes each pixel for a bold face."""
     for ch in s:
-        g = FONT.get(ch, FONT["?"])
-        for r in range(7):
-            bits = g[r]
-            if not bits:
-                continue
-            yy = y + r * scale
-            for c in range(5):
-                if bits & (1 << (4 - c)):
-                    xx = x + c * scale
-                    cv.fill(xx, yy, xx + scale - 1, yy + scale - 1, color)
-        if bold:
-            for r in range(7):
-                bits = g[r]
-                for c in range(5):
-                    if bits & (1 << (4 - c)):
-                        xx = x + c * scale + bold
-                        cv.fill(xx, y + r * scale, xx + scale - 1,
-                                y + r * scale + scale - 1, color)
-        x += 6 * scale
+        pattern = GLYPHS.get(ch, GLYPHS["?"])
+        for row in range(7):
+            bits = pattern[row]
+            for col in range(5):
+                if bits & (1 << (4 - col)):
+                    px = x + col * k
+                    py = y + row * k
+                    page.rect(px, py, px + k - 1, py + k - 1, tone)
+                    if weight:
+                        page.rect(px + weight, py, px + weight + k - 1,
+                                  py + k - 1, tone)
+        x += 6 * k
 
 
-def wrap(s, scale, maxw):
-    lines, cur = [], ""
+def linebreak(s, k, width_limit):
+    """Greedy word wrap measured against the bitmap metric."""
+    lines, run = [], ""
     for word in s.split():
-        trial = word if not cur else cur + " " + word
-        if text_w(trial, scale) <= maxw:
-            cur = trial
+        candidate = word if not run else run + " " + word
+        if width(candidate, k) <= width_limit:
+            run = candidate
         else:
-            if cur:
-                lines.append(cur)
-            cur = word
-    if cur:
-        lines.append(cur)
+            if run:
+                lines.append(run)
+            run = word
+    if run:
+        lines.append(run)
     return lines
 
 
-def draw_para(cv, x, y, s, scale, color, maxw, lead, bold=0):
-    for line in wrap(s, scale, maxw):
-        draw_text(cv, x, y, line, scale, color, bold)
+def set_paragraph(page, s, x, y, k, tone, width_limit, lead, weight=0):
+    for line in linebreak(s, k, width_limit):
+        set_line(page, x, y, line, k, tone, weight)
         y += lead
     return y
 
 
-def draw_kicker(cv, x, y, tag, scale=2):
-    draw_text(cv, x, y, tag, scale, RED, bold=scale // 2)
-    cv.hline(x, x + text_w(tag, scale) - scale, y + 8 * scale + 1, RED, 2)
-    return y + 8 * scale + 1 + 2
+def slug(page, x, y, tag, k=2):
+    """Red section kicker with its underline; returns the next baseline."""
+    set_line(page, x, y, tag, k, TONE_ACCENT, weight=k // 2)
+    page.bar(x, x + width(tag, k) - k, y + 8 * k + 1, TONE_ACCENT, 2)
+    return y + 8 * k + 3
 
 
-def draw_pico(cv, x, y, key, scale):
-    art = PICO[key]
-    for r, row in enumerate(art):
-        for c, ch in enumerate(row):
-            col = PICO_PALETTE.get(ch)
-            if col:
-                cv.fill(x + c * scale, y + r * scale,
-                        x + c * scale + scale - 1, y + r * scale + scale - 1, col)
-    return len(art) * scale, max(len(r) for r in art) * scale
+def stamp(page, name, x, y, k):
+    """Blit a 12x12 spot icon at integer scale k."""
+    art = ICONS[name]
+    for row, cells in enumerate(art):
+        for col, cell in enumerate(cells):
+            tone = ICON_INKS.get(cell)
+            if tone:
+                page.rect(x + col * k, y + row * k,
+                          x + col * k + k - 1, y + row * k + k - 1, tone)
+    return len(art) * k, max(len(r) for r in art) * k
 
 
-# ----------------------------------------------------------------- layout --
+# --------------------------------------------------------- page furniture -
 
-MARGIN = 28
-CONTENT = W - 2 * MARGIN  # 968
-
-
-def masthead(cv):
-    x0, x1 = MARGIN, W - MARGIN
-    cv.hline(x0, x1, 18, RULE, 4)
-    y = 26
-    draw_text(cv, x0, y, "SUNDAY FINAL EDITION", 2, GREY)
-    right = "WORLD EDITION - PRICE $2.50"
-    draw_text(cv, x1 - text_w(right, 2), y, right, 2, GREY)
+def nameplate(page):
+    """Folio band, masthead title, motto row and the big date line."""
+    left, right = SIDE, PAGE_W - SIDE
+    page.bar(left, right, 18, TONE_RULE, 4)
+    set_line(page, left, 26, "SUNDAY FINAL EDITION", 2, TONE_FAINT)
+    price = "WORLD EDITION - PRICE $2.50"
+    set_line(page, right - width(price, 2), 26, price, 2, TONE_FAINT)
 
     title = "THE WORLD DAILY"
-    tw = text_w(title, 7)
-    draw_text(cv, (W - tw) // 2, 44, title, 7, INK, bold=2)
+    set_line(page, (PAGE_W - width(title, 7)) // 2, 44, title, 7,
+             TONE_TEXT, weight=2)
 
-    cv.hline(x0, x1, 98, RULE, 3)
-    cv.hline(x0, x1, 104, RULE, 1)
+    page.bar(left, right, 98, TONE_RULE, 3)
+    page.bar(left, right, 104, TONE_RULE, 1)
 
-    y = 110
-    draw_text(cv, x0, y, "VOL. CXLII - No. 32,588", 2, GREY)
+    set_line(page, left, 110, "VOL. CXLII - No. 32,588", 2, TONE_FAINT)
     motto = "INTELLIGENCE FOR A CHANGING WORLD"
-    draw_text(cv, (W - text_w(motto, 2)) // 2, y, motto, 2, GREY)
-    draw_text(cv, x1 - text_w("FOUNDED 1884", 2), y, "FOUNDED 1884", 2, GREY)
+    set_line(page, (PAGE_W - width(motto, 2)) // 2, 110, motto, 2,
+             TONE_FAINT)
+    legacy = "FOUNDED 1884"
+    set_line(page, right - width(legacy, 2), 110, legacy, 2, TONE_FAINT)
 
-    date = "Sunday, 22 November 2026"
-    dw = text_w(date, 4)
-    draw_text(cv, (W - dw) // 2, 128, date, 4, INK, bold=1)
+    dateline = "Sunday, 22 November 2026"
+    set_line(page, (PAGE_W - width(dateline, 4)) // 2, 128, dateline, 4,
+             TONE_TEXT, weight=1)
 
-    cv.hline(x0, x1, 162, RULE, 3)
-    cv.hline(x0, x1, 168, RULE, 1)
-
-
-def banner(cv, y):
-    x = MARGIN
-    ky = draw_kicker(cv, x, y, BANNER_TAG, 3)
-    hy = ky + 6
-    hy = draw_para(cv, x, hy, BANNER_HEAD, 6, INK, CONTENT, 48, bold=2)
-    dy = hy + 8
-    dy = draw_para(cv, x, dy, BANNER_DECK, 2, INK, CONTENT, 16)
-    return dy
+    page.bar(left, right, 162, TONE_RULE, 3)
+    page.bar(left, right, 168, TONE_RULE, 1)
 
 
-def lead_block(cv, y):
-    # Left: Iran standoff body with tanker art
-    lx, lw = MARGIN, 596
-    art_w = 60
-    draw_pico(cv, lx + lw - art_w, y, "tanker", 5)
-    lby = draw_para(cv, lx, y, IRAN_BODY, 2, INK, lw - art_w - 14, 16)
-
-    # Right: COP31 overtime
-    rx, rw = 648, 348
-    draw_pico(cv, rx + rw - 36, y, "globe", 3)
-    ky = draw_kicker(cv, rx, y, STORIES["cop"]["tag"], 2)
-    hy = ky + 8
-    hy = draw_para(cv, rx, hy, STORIES["cop"]["head"], 3, INK, rw - 44, 24,
-                   bold=1)
-    rby = draw_para(cv, rx, hy + 6, STORIES["cop"]["body"], 2, INK, rw, 15)
-    return max(lby, rby)
+def splash(page, y):
+    """Banner kicker, six-column headline and deck across the full span."""
+    under_slug = slug(page, SIDE, y, LEAD_KICKER, 3)
+    head_end = set_paragraph(page, LEAD_HEADLINE, SIDE, under_slug + 6, 6,
+                             TONE_TEXT, SPAN, 48, weight=2)
+    return set_paragraph(page, LEAD_DECK, SIDE, head_end + 8, 2,
+                         TONE_TEXT, SPAN, 16)
 
 
-def grid_story(cv, x, y, story, pico_scale=2):
-    draw_pico(cv, x + 309 - 12 * pico_scale, y, story["pico"], pico_scale)
-    ky = draw_kicker(cv, x, y, story["tag"], 2)
-    hy = ky + 6
-    hy = draw_para(cv, x, hy, story["head"], 2, INK, 309 - 32, 16, bold=1)
-    draw_para(cv, x, hy + 4, story["body"], 2, INK, 309, 13)
+def twincolumns(page, y):
+    """Iran standoff copy left, COP31 box right; returns the deepest y."""
+    lx, lw = LEFT_COL
+    rx, rw = RIGHT_COL
+    stamp(page, "tanker", lx + lw - 60, y, 5)
+    left_end = set_paragraph(page, IRAN_COPY, lx, y, 2, TONE_TEXT,
+                             lw - 60 - 14, 16)
+
+    stamp(page, COP31[3], rx + rw - 36, y, 3)
+    after_slug = slug(page, rx, y, COP31[0])
+    head_end = set_paragraph(page, COP31[1], rx, after_slug + 8, 3,
+                             TONE_TEXT, rw - 44, 24, weight=1)
+    right_end = set_paragraph(page, COP31[2], rx, head_end + 6, 2,
+                              TONE_TEXT, rw, 15)
+    return max(left_end, right_end)
 
 
-def grid(cv, y):
-    keys = ["pol", "den", "mex", "irq", "yth", "esp"]
-    cellw, gut = 309, 20
-    pitch = 112
-    for i, key in enumerate(keys):
-        row, col = divmod(i, 3)
-        grid_story(cv, MARGIN + col * (cellw + gut), y + row * pitch,
-                   STORIES[key])
-    gy1, gy2 = y, y + 2 * pitch - 6
-    cv.hline(MARGIN, W - MARGIN, y + pitch - 6, GREY, 1)
-    for col in (1, 2):
-        gx = MARGIN + col * (cellw + gut) - gut // 2
-        cv.vline(gx, gy1, gy2, GREY, 1)
-    return gy2
+def wire_cell(page, x, y, tag, head, body, icon_name):
+    stamp(page, icon_name, x + CELL_W - 24, y, 2)
+    after_slug = slug(page, x, y, tag)
+    head_end = set_paragraph(page, head, x, after_slug + 6, 2, TONE_TEXT,
+                             CELL_W - 32, 16, weight=1)
+    set_paragraph(page, body, x, head_end + 4, 2, TONE_TEXT, CELL_W, 13)
 
 
-def briefs(cv, y):
-    x = MARGIN
-    draw_text(cv, x, y + 4, "IN BRIEF", 2, RED, bold=1)
-    yy = y + 24
-    for pkey, tag, item in BRIEFS:
-        draw_pico(cv, x, yy - 2, pkey, 2)
-        tx = x + 32
-        draw_text(cv, tx, yy, tag + ":", 2, RED, bold=1)
-        tw = text_w(tag + ":", 2) + 10
-        lines = wrap(item, 2, W - MARGIN - (tx + tw))
-        draw_para(cv, tx + tw, yy, item, 2, INK, W - MARGIN - (tx + tw), 14)
-        yy += 14 * len(lines) + 6
-    return yy
+def wiregrid(page, y):
+    """Six wire stories, three columns by two rows, with hairlines."""
+    for index, (tag, head, body, icon_name) in enumerate(WIRE):
+        column, row = index % 3, index // 3
+        wire_cell(page, SIDE + column * (CELL_W + GUTTER), y + row * ROW_STEP,
+                  tag, head, body, icon_name)
+    page.bar(SIDE, PAGE_W - SIDE, y + ROW_STEP - 6, TONE_FAINT, 1)
+    for column in (1, 2):
+        page.post(SIDE + column * (CELL_W + GUTTER) - GUTTER // 2, y,
+                  y + 2 * ROW_STEP - 6, TONE_FAINT, 1)
+    return y + 2 * ROW_STEP - 6
 
 
-def footer(cv, y):
-    x0, x1 = MARGIN, W - MARGIN
-    cv.hline(x0, x1, y, RULE, 3)
-    cv.hline(x0, x1, y + 6, RULE, 1)
-    line = ("THE WORLD DAILY - PAGE ONE - SUNDAY, 22 NOVEMBER 2026 - LATE "
-            "FINAL")
-    draw_text(cv, (W - text_w(line, 2)) // 2, y + 14, line, 2, GREY)
+def agaterow(page, y):
+    """IN BRIEF strip: stacked one-to-two line items with spot icons."""
+    set_line(page, SIDE, y + 4, "IN BRIEF", 2, TONE_ACCENT, weight=1)
+    cursor = y + 24
+    for icon_name, tag, item in AGATE:
+        stamp(page, icon_name, SIDE, cursor - 2, 2)
+        label = tag + ":"
+        set_line(page, SIDE + 32, cursor, label, 2, TONE_ACCENT, weight=1)
+        inset = SIDE + 32 + width(label, 2) + 10
+        cursor = set_paragraph(page, item, inset, cursor, 2, TONE_TEXT,
+                               PAGE_W - SIDE - inset, 14) + 6
+    return cursor
 
 
-def render():
-    cv = Canvas(W, H, PAPER)
-    grain(cv)
-    masthead(cv)
+def imprint(page, y):
+    """Bottom rule stack and the centred edition line."""
+    left, right = SIDE, PAGE_W - SIDE
+    page.bar(left, right, y, TONE_RULE, 3)
+    page.bar(left, right, y + 6, TONE_RULE, 1)
+    line = "THE WORLD DAILY - PAGE ONE - SUNDAY, 22 NOVEMBER 2026 - LATE FINAL"
+    set_line(page, (PAGE_W - width(line, 2)) // 2, y + 14, line, 2,
+             TONE_FAINT)
 
-    by = banner(cv, 178)
-    cv.hline(MARGIN, W - MARGIN, by + 8, RULE, 2)
-    cv.hline(MARGIN, W - MARGIN, by + 14, RULE, 1)
 
-    ly = lead_block(cv, by + 22)
-    cv.vline(636, by + 22, ly, GREY, 1)
+# -------------------------------------------------------------- assembly --
 
-    gy = grid(cv, ly + 22)
-    byy = briefs(cv, gy + 18)
-    footer(cv, byy + 14)
+def build():
+    page = Page(PAGE_W, PAGE_H, NEWSPRINT)
+    speckle(page)
+    nameplate(page)
 
-    outdir = os.environ.get("MAKEFUN_OUTPUT_DIR") or "out"
-    os.makedirs(outdir, exist_ok=True)
-    path = os.path.join(outdir, "entry.png")
-    write_png(path, W, H, cv.data)
-    print("wrote", path)
+    deck_end = splash(page, 178)
+    page.bar(SIDE, PAGE_W - SIDE, deck_end + 8, TONE_RULE, 2)
+    page.bar(SIDE, PAGE_W - SIDE, deck_end + 14, TONE_RULE, 1)
+
+    columns_end = twincolumns(page, deck_end + 22)
+    page.post(636, deck_end + 22, columns_end, TONE_FAINT, 1)
+
+    agate_top = wiregrid(page, columns_end + 22) + 18
+    imprint(page, agaterow(page, agate_top) + 14)
+    return page
+
+
+def main():
+    folder = os.environ.get("MAKEFUN_OUTPUT_DIR") or "out"
+    os.makedirs(folder, exist_ok=True)
+    target = os.path.join(folder, "entry.png")
+    page = build()
+    encode_png(target, PAGE_W, PAGE_H, page.pixels)
+    print("wrote", target)
 
 
 if __name__ == "__main__":
-    render()
+    main()
